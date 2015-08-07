@@ -5,6 +5,18 @@
  * http://www.apache.org/licenses/LICENSE-2.0.html  
  */
 
-var Cbe = require('./cbe.min.js');
+var express = require('express'),
+    app = express(),
+    CBE = require('./cbe.js'),
+    cbe = new CBE(require('./settings.js'));
 
-new Cbe();
+
+
+app.use('', cbe.app);
+
+// listen on c9
+// https://cbe-daxxog.c9.io/
+
+console.log([process.env.IP, process.env.PORT].join(':'));
+console.log('https://cbe-daxxog.c9.io/');
+app.listen(process.env.PORT, process.env.IP);

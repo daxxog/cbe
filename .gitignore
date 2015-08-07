@@ -5,3 +5,4 @@ npm-debug.log
 ._.DS_Store
 cli.min.js
 cbe.min.js
+settings.js
