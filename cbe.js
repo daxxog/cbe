@@ -60,7 +60,7 @@
                 that.transactions = db.collection('transactions');
                 that.emit('connected');
             } else {
-                eh(err);
+                eh(err, 1);
             }
         });
         
@@ -76,7 +76,10 @@
                     if(!err) {
                         client.hset('cbe', cmd, JSON.stringify(data), cb);
                     } else {
-                        cb(err);
+                        cb({
+                            Error: err,
+                            command: cmd
+                        });
                     }
                 });
             }, function(err) {
@@ -86,7 +89,11 @@
                     cb(err);
                 }
             });
-        }, eh);
+        }, function(err) {
+            if(err) {
+                eh(err, 7);
+            }
+        });
         
         //cached api
         versions.forEach(function(version) {
@@ -100,11 +107,11 @@
                                         var data = JSON.parse(_data);
                                         res.json(data);
                                     } catch(e) {
-                                        eh(e);
+                                        eh(e, 6);
                                         res.status(500).json('sec J1');
                                     }
                                 } else {
-                                    eh(err);
+                                    eh(err, 2);
                                     res.status(500).json('sec R1');
                                 }
                             });
@@ -142,13 +149,17 @@
                                 if(v !== true) {
                                     that.blockGrabber.push(i, cb);
                                 }
-                            }, eh);
+                            }, function(err) {
+                                if(err) {
+                                    eh(err, 5);
+                                }
+                            });
                         } else {
-                            eh(err);
+                            eh(err, 3);
                         }
                     });
                 } else {
-                    eh(err);
+                    eh(err, 4);
                 }
             });
         });
@@ -161,7 +172,10 @@
                 if(!err) {
                     that.blocks.insert(CBE.parseBlock(block), cb);
                 } else {
-                    cb(err);
+                    cb({
+                        Error: err,
+                        command: 'getblockbynumber'
+                    });
                 }
             });
         }, 4);
