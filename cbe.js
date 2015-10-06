@@ -5,6 +5,8 @@
  * http://www.apache.org/licenses/LICENSE-2.0.html  
  */
 
+//eh pos: 11
+
 /* UMD LOADER: https://github.com/umdjs/umd/blob/master/returnExports.js */
 (function (root, factory) {
     if (typeof exports === 'object') {
@@ -58,6 +60,14 @@
             if(!err) {
                 that.blocks = db.collection('blocks');
                 that.transactions = db.collection('transactions');
+                that.txos = db.collection('txos');
+                that.txis = db.collection('txis');
+                
+                //that.blocks.drop();
+                that.transactions.drop();
+                that.txos.drop();
+                that.txis.drop();
+                
                 that.emit('connected');
             } else {
                 eh(err, 1);
@@ -145,6 +155,9 @@
                                 }
                             });
                             
+                            //that.blockGrabber.push(523939);
+                            //that.blockGrabber.push(525360);
+                            
                             async.forEachOf(all, function(v, i, cb) {
                                 if(v !== true) {
                                     that.blockGrabber.push(i, cb);
@@ -170,7 +183,20 @@
             
             rpc.cmd('getblockbynumber', height, function(err, block) {
                 if(!err) {
-                    that.blocks.insert(CBE.parseBlock(block), cb);
+                    var parsed = CBE.parseBlock(block);
+                    
+                    parsed.tx.forEach(function(hash) {
+                        var tx = {};
+                        
+                        tx.height = height;
+                        tx.hash = hash;
+                        
+                        that.txGrabber.push(tx, function(err) {
+                            eh(err, 8);
+                        });
+                    });
+                    
+                    that.blocks.insert(parsed, cb);
                 } else {
                     cb({
                         Error: err,
@@ -178,7 +204,65 @@
                     });
                 }
             });
-        }, 4);
+        }, 2);
+        
+        //async magical tx grabber, dumps into mongodb
+        this.txGrabber = async.queue(function(tx, cb) {
+            var hash = tx.hash,
+                height = tx.height;
+            
+            console.log('getting transaction ' + hash);
+            
+            rpc.cmd('gettransaction', hash, function(err, tx) {
+                if(!err) {
+                    var parsed;
+                    
+                    tx.height = height;
+                    parsed = CBE.parseTx(tx);
+                    
+                    parsed.vout.forEach(function(txo) {
+                        that.txos.insert(CBE.parseTxo(parsed, txo), function(err) {
+                            if(err) {
+                                eh({
+                                    Error: err,
+                                    collection: 'txos',
+                                    command: 'gettransaction'
+                                }, 9);
+                            }
+                        });
+                    });
+                    
+                    parsed.vin.forEach(function(txi) {
+                        CBE.parseTxi(parsed, txi, that.txos, function(err, parsed) {
+                            if(!err) {
+                                that.txis.insert(parsed, function(err) {
+                                    if(err) {
+                                        eh({
+                                            Error: err,
+                                            collection: 'txis',
+                                            command: 'gettransaction'
+                                        }, 11);
+                                    }
+                                });
+                            } else {
+                                eh({
+                                    Error: err,
+                                    collection: 'txos',
+                                    command: 'gettransaction'
+                                }, 10);
+                            }
+                        });
+                    });
+                    
+                    that.transactions.insert(parsed, cb);
+                } else {
+                    cb({
+                        Error: err,
+                        command: 'gettransaction'
+                    });
+                }
+            });
+        }, 2);
     }; inherits(CBE, EventEmitter);
     
     CBE.parseBlock = function(parse) {
@@ -215,6 +299,95 @@
         block.tx = parse.tx;
         
         return block;
+    };
+    
+    CBE.parseTx = function(parse) {
+        var tx = {};
+        
+        tx._id = parse.txid;
+        tx.version = parse.version;
+        tx.time = parse.time;
+        tx.locktime = parse.locktime;
+        
+        if(tx.version === 2) {
+            tx.clamspeech = parse['clam-speech'];
+        }
+        
+        tx.vin = parse.vin;
+        tx.vout = parse.vout;
+        tx.blockhash = parse.blockhash;
+        tx.height = parse.height;
+        
+        return tx;
+    };
+    
+    CBE.parseTxo = function(tx, parse) {
+        var txo = {};
+        
+        txo._id = [tx._id, parse.n].join(':');
+        txo.spent = false;
+        txo.value = parse.value;
+        txo.time = tx.time;
+        txo.locktime = tx.locktime;
+        txo.height = tx.height;
+        
+        if(parse.scriptPubKey.type !== 'nonstandard') {
+            if(parse.scriptPubKey.addresses.length === 1) {
+                txo.address = parse.scriptPubKey.addresses[0];
+            } else {
+                console.log('found addresses.length > 1');
+            }
+        } else {
+            txo.address = 'nonstandard';
+            console.log('found nonstandard transaction');
+        }
+        
+        return txo;
+    };
+    
+    CBE.parseTxi = function(tx, parse, txos, cb) {
+        var txi = {},
+            coinbase = false;
+        
+        if(typeof parse.coinbase === 'string') {
+            txi.coinbase = parse.coinbase;
+            coinbase = true;
+        } else {
+            txi._id = [parse.txid, parse.vout].join(':');
+        }
+        
+        txi.txid = tx._id;
+        txi.time = tx.time;
+        txi.locktime = tx.locktime;
+        txi.height = tx.height;
+        //not used txi.sequence = parse.sequence;
+        
+        if(!coinbase) {
+            setTimeout(function() {
+                txos.findAndModify({
+                    _id: txi._id
+                }, {}, {
+                    $set: {
+                        spent: true
+                    }
+                }, function(err, doc) {
+                    var txo = doc.value;
+                    
+                    if(!err) {
+                        if(txo !== null) {
+                            txi.address = txo.address;
+                            txi.value = txo.value;
+                            
+                            cb(null, txi);
+                        } else {
+                            cb('Could not find txo for txi: ' + txi._id);
+                        }
+                    } else {
+                        cb(err);
+                    }
+                });
+            }, 1000); //wait to update
+        }
     };
     
     return CBE;
