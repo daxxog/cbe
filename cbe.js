@@ -5,7 +5,7 @@
  * http://www.apache.org/licenses/LICENSE-2.0.html  
  */
 
-//eh pos: 11
+//eh pos: 12
 
 /* UMD LOADER: https://github.com/umdjs/umd/blob/master/returnExports.js */
 (function (root, factory) {
@@ -59,14 +59,18 @@
         MongoClient.connect(options.mongo, function(err, db) {
             if(!err) {
                 that.blocks = db.collection('blocks');
+                that.rawtransactions = db.collection('rawtransactions');
                 that.transactions = db.collection('transactions');
                 that.txos = db.collection('txos');
                 that.txis = db.collection('txis');
                 
-                //that.blocks.drop();
+                /*
+                that.blocks.drop();
+                that.rawtransactions.drop();
                 that.transactions.drop();
                 that.txos.drop();
                 that.txis.drop();
+                */
                 
                 that.emit('connected');
             } else {
@@ -194,6 +198,10 @@
                         that.txGrabber.push(tx, function(err) {
                             eh(err, 8);
                         });
+                        
+                        that.rawTxGrabber.push(hash, function(err) {
+                            eh(err, 12);
+                        });
                     });
                     
                     that.blocks.insert(parsed, cb);
@@ -263,6 +271,25 @@
                 }
             });
         }, 2);
+        
+        //async magical raw tx grabber, dumps into mongodb
+        this.rawTxGrabber = async.queue(function(hash, cb) {
+            console.log('getting raw transaction ' + hash);
+            
+            rpc.cmd('getrawtransaction', hash, function(err, rawtx) {
+                if(!err) {
+                    that.rawtransactions.insert({
+                        _id: hash,
+                        data: rawtx
+                    }, cb);
+                } else {
+                    cb({
+                        Error: err,
+                        command: 'getrawtransaction'
+                    });
+                }
+            });
+        });
     }; inherits(CBE, EventEmitter);
     
     CBE.parseBlock = function(parse) {
@@ -386,7 +413,7 @@
                         cb(err);
                     }
                 });
-            }, 1000); //wait to update
+            }, 10000); //wait to update
         }
     };
     
