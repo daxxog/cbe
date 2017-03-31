@@ -51,40 +51,45 @@
             that   = this,
             
             PULSE = 10000;
-            
-        if(typeof options.redis.auth === 'string') {
-            client.auth(options.redis.auth, eh); //redis authentication
-        }
         
-        MongoClient.connect(options.mongo, function(err, db) {
-            if(!err) {
-                that.blocks = db.collection('blocks');
-                that.rawtransactions = db.collection('rawtransactions');
-                that.transactions = db.collection('transactions');
-                that.txos = db.collection('txos');
-                that.txis = db.collection('txis');
-                
-                /*
-                that.blocks.drop();
-                that.rawtransactions.drop();
-                that.transactions.drop();
-                that.txos.drop();
-                that.txis.drop();
-                */
-                
-                that.emit('connected');
-            } else {
-                eh(err, 1);
+        client.on('connect', function () {
+            if(typeof options.redis.auth === 'string') {
+                client.auth(options.redis.auth, eh); //redis authentication
             }
+
+            MongoClient.connect(options.mongo, function(err, db) {
+                if(!err) {
+                    that.blocks = db.collection('blocks');
+                    that.rawtransactions = db.collection('rawtransactions');
+                    that.transactions = db.collection('transactions');
+                    that.txos = db.collection('txos');
+                    that.txis = db.collection('txis');
+                    
+                    /*
+                    that.blocks.drop();
+                    that.rawtransactions.drop();
+                    that.transactions.drop();
+                    that.txos.drop();
+                    that.txis.drop();
+                    */
+                    
+                    console.log('mongo connected');
+
+                    that.emit('connected');
+                } else {
+                    eh(err, 1);
+                }
+            });
         });
-        
+
+
         //root
         app.get('/', function(req, res) {
             res.json({});
         });
-        
+
         //magic cache
-        async.forever(function(cb) {
+        /*async.forever(function(cb) {
             async.forEach(cachedCommands, function(cmd, cb) {
                 rpc.cmd(cmd, function(err, data) {
                     if(!err) {
@@ -107,8 +112,9 @@
             if(err) {
                 eh(err, 7);
             }
-        });
+        });*/
         
+
         //cached api
         versions.forEach(function(version) {
             switch(version) {
@@ -161,10 +167,10 @@
                             
                             //that.blockGrabber.push(523939);
                             //that.blockGrabber.push(525360);
-                            
+
                             async.forEachOf(all, function(v, i, cb) {
                                 if(v !== true) {
-                                    that.blockGrabber.push(i, cb);
+                                    that.blockGrabber.push(i, 3, cb);
                                 }
                             }, function(err) {
                                 if(err) {
@@ -182,12 +188,16 @@
         });
         
         //async magical block grabber, dumps into mongodb
-        this.blockGrabber = async.queue(function(height, cb) {
-            console.log('getting block #' + height);
+        this.blockGrabber = async.priorityQueue(function(id, cb) {
             
-            rpc.cmd('getblockbynumber', height, function(err, block) {
+            //if(typeof id === 'number' && id % 1000 === 0) {
+                console.log('getting block #' + id);
+            //}
+            
+            rpc.cmd((typeof id === 'number') ? 'getblockbynumber' : 'getblock', id, function(err, block) {
                 if(!err) {
-                    var parsed = CBE.parseBlock(block);
+                    var parsed = CBE.parseBlock(block),
+                        height = block.height;
                     
                     parsed.tx.forEach(function(hash) {
                         var tx = {};
@@ -195,16 +205,22 @@
                         tx.height = height;
                         tx.hash = hash;
                         
-                        that.txGrabber.push(tx, function(err) {
-                            eh(err, 8);
-                        });
-                        
-                        that.rawTxGrabber.push(hash, function(err) {
-                            eh(err, 12);
-                        });
+                        if(height !== 0) { //block 0 causes an error
+                            that.txGrabber.push(tx, function(err) {
+                                eh(err, 8);
+                            });
+                            
+                            that.rawTxGrabber.push(hash, function(err) {
+                                eh(err, 12);
+                            });
+                        }
                     });
                     
-                    that.blocks.insert(parsed, cb);
+                    if(typeof id === 'number') {
+                        that.blocks.insert(parsed, cb);
+                    } else {
+                        cb();
+                    }
                 } else {
                     cb({
                         Error: err,
@@ -219,7 +235,7 @@
             var hash = tx.hash,
                 height = tx.height;
             
-            console.log('getting transaction ' + hash);
+            //console.log('getting transaction ' + hash);
             
             rpc.cmd('gettransaction', hash, function(err, tx) {
                 if(!err) {
@@ -253,11 +269,35 @@
                                     }
                                 });
                             } else {
-                                eh({
-                                    Error: err,
-                                    collection: 'txos',
-                                    command: 'gettransaction'
-                                }, 10);
+                                if(typeof err === 'object' && err.err === 'notfound') {
+                                    console.log('self heal', err.txid, err.vout, hash);
+
+                                    rpc.cmd('gettransaction', err.txid, function(err, tx) {
+                                        if(!err) {
+                                            that.blockGrabber.push(tx.blockhash, 0, function(err) {
+                                                console.log('running self heal on block #' + tx.blockhash);
+
+                                                rpc.cmd('gettransaction', hash, function(err, tx) {
+                                                    if(!err) {
+                                                        that.blockGrabber.push(tx.blockhash, 0, function(err) {
+                                                            console.log('re-grabbing block #' + tx.blockhash);
+                                                        });
+                                                    } else {
+                                                        console.log(err, tx);
+                                                    }
+                                                });
+                                            });
+                                        } else {
+                                            console.log(err, tx);
+                                        }
+                                    });
+                                } else {
+                                    eh({
+                                        Error: err,
+                                        collection: 'txos',
+                                        command: 'gettransaction'
+                                    }, 10);
+                                }
                             }
                         });
                     });
@@ -274,7 +314,7 @@
         
         //async magical raw tx grabber, dumps into mongodb
         this.rawTxGrabber = async.queue(function(hash, cb) {
-            console.log('getting raw transaction ' + hash);
+            //console.log('getting raw transaction ' + hash);
             
             rpc.cmd('getrawtransaction', hash, function(err, rawtx) {
                 if(!err) {
@@ -285,6 +325,7 @@
                 } else {
                     cb({
                         Error: err,
+                        hash: hash,
                         command: 'getrawtransaction'
                     });
                 }
@@ -292,6 +333,8 @@
         });
     }; inherits(CBE, EventEmitter);
     
+
+    //CBE global functions
     CBE.parseBlock = function(parse) {
         var block = {};
         
@@ -369,6 +412,8 @@
             console.log('found nonstandard transaction');
         }
         
+        //console.log('parsetxo: '+txo._id);
+
         return txo;
     };
     
@@ -376,6 +421,13 @@
         var txi = {},
             coinbase = false;
         
+        if(tx._id === '9cb219497ac02d5d62b8a209318604599ac821422bcf7cdfc43b7a9de048968d') {
+            console.log('tx', tx);
+            console.log('parse', parse);
+            console.log('txos', txos);
+            console.log('cb', cb);
+        }
+
         if(typeof parse.coinbase === 'string') {
             txi.coinbase = parse.coinbase;
             coinbase = true;
@@ -407,13 +459,19 @@
                             
                             cb(null, txi);
                         } else {
-                            cb('Could not find txo for txi: ' + txi._id);
+                            cb({
+                                err: 'notfound',
+                                txid: parse.txid,
+                                vout: parse.vout
+                            });
                         }
                     } else {
                         cb(err);
                     }
                 });
             }, 10000); //wait to update
+        } else {
+            //console.log('coinbase tx: ' + tx._id);
         }
     };
     
